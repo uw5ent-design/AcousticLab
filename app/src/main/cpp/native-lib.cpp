@@ -38,6 +38,10 @@ private:
     std::vector<float> outputBuffer;
     int bufferIndex = 0;
     float window[FFT_SIZE];
+    
+    // Сглаживание для борьбы с жужжанием
+    std::vector<float> prevGain;
+    std::vector<float> smoothGain;
 
     std::atomic<bool> isRecording_{false};
     std::vector<float> recordedBuffer;
@@ -57,6 +61,9 @@ public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
         noiseProfile.resize(FFT_SIZE / 2 + 1, 0.0f);
+        prevGain.resize(FFT_SIZE / 2 + 1, 1.0f);
+        smoothGain.resize(FFT_SIZE / 2 + 1, 1.0f);
+        
         inputBuffer.resize(FFT_SIZE, 0.0f);
         outputBuffer.resize(FFT_SIZE, 0.0f);
         
@@ -135,11 +142,8 @@ public:
                 mixed = bandpass.process(mixed);
             }
 
-            // Всегда пишем в буфер (чтобы не было разрывов при включении)
             inputBuffer[FFT_SIZE - HOP_SIZE + bufferIndex] = mixed;
             
-            // Если шумодав ВКЛЮЧЕН, берем звук из обработанного буфера.
-            // Если ВЫКЛЮЧЕН - звук идет напрямую (чистый шум без жужжания).
             if (reducing || learning) {
                 floatData[i] = outputBuffer[bufferIndex];
             } else {
@@ -209,21 +213,33 @@ public:
 
         for (int k = 0; k <= FFT_SIZE / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
+            
             if (learning) {
                 noiseProfile[k] = std::max(noiseProfile[k], mag);
-            } else if (reducing) {
+            } 
+            
+            if (reducing && !learning) {
+                // 1. Вычисляем "маску" громкости (Gain) от 0.0 до 1.0
+                float targetGain = 1.0f;
                 float subtractValue = noiseProfile[k] * currentScale;
                 
-                // 10% Spectral Floor (убирает жужжание)
-                float cleanMag = std::max(mag - subtractValue, mag * 0.1f);
-                
-                if (mag < currentThreshold) {
-                    cleanMag = mag * 0.02f; 
+                if (mag > subtractValue) {
+                    targetGain = (mag - subtractValue) / mag;
+                } else {
+                    targetGain = 0.0f; 
                 }
                 
-                float phase = atan2f(imag[k], real[k]);
-                real[k] = cleanMag * cosf(phase);
-                imag[k] = cleanMag * sinf(phase);
+                // Применяем Threshold (если сигнал тише порога, режем сильнее)
+                if (mag < currentThreshold) {
+                    targetGain *= 0.1f; 
+                }
+                
+                // 2. Сглаживание во времени (убирает жужжание)
+                smoothGain[k] = 0.7f * smoothGain[k] + 0.3f * targetGain;
+                
+                // Применяем плавную маску к оригинальному сигналу (сохраняя фазу)
+                real[k] *= smoothGain[k];
+                imag[k] *= smoothGain[k];
             }
         }
         
@@ -235,7 +251,6 @@ public:
         fft(real, imag, true);
 
         for (int i = 0; i < FFT_SIZE; ++i) {
-            // Коэффициент 0.66 правильный для Hann окна с 50% перекрытием
             outputBuffer[i] += real[i] * window[i] * 0.66f; 
         }
     }
@@ -258,7 +273,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Anti-Buzz Active."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Smooth NR Mode."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
