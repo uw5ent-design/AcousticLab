@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.widget.Button
+import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
@@ -27,7 +28,8 @@ class MainActivity : AppCompatActivity() {
     external fun startAudio(): Boolean
     external fun stopAudio()
     external fun getFftData(outArray: FloatArray)
-    external fun setMixRatio(ratio: Float) // <-- Наш новый метод
+    external fun setMixRatio(ratio: Float)
+    external fun setFilterEnabled(enabled: Boolean) // Новый метод
 
     private val fftBuffer = FloatArray(64)
     private val handler = Handler(Looper.getMainLooper())
@@ -58,18 +60,25 @@ class MainActivity : AppCompatActivity() {
             text = getDspStatus()
         }
 
-        // Настраиваем ползунок
         val mixerSlider = SeekBar(this).apply {
             max = 100
-            progress = 50 // По умолчанию 50 на 50
+            progress = 50 
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    // ОТПРАВЛЯЕМ ЗНАЧЕНИЕ В C++ (делим на 100.0, чтобы получить 0.0 - 1.0)
                     setMixRatio(progress / 100.0f)
                 }
                 override fun onStartTrackingTouch(seekBar: SeekBar?) {}
                 override fun onStopTrackingTouch(seekBar: SeekBar?) {}
             })
+        }
+
+        // ДОБАВЛЯЕМ ГАЛОЧКУ ДЛЯ ФИЛЬТРОВ
+        val filterCheckBox = CheckBox(this).apply {
+            text = "Включить DSP-фильтры (300-3400 Гц)"
+            isChecked = true // По умолчанию включено
+            setOnCheckedChangeListener { _, isChecked ->
+                setFilterEnabled(isChecked)
+            }
         }
 
         spectrogramView = SpectrogramView(this).apply {
@@ -98,6 +107,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(textView)
         layout.addView(TextView(this).apply { text = "Баланс (Шум <---> Микрофон):" })
         layout.addView(mixerSlider)
+        layout.addView(filterCheckBox)
         layout.addView(spectrogramView)
         layout.addView(btnStart)
         layout.addView(btnStop)
@@ -119,7 +129,7 @@ class MainActivity : AppCompatActivity() {
 class SpectrogramView(context: Context) : android.view.View(context) {
     private var fftData = FloatArray(64)
     private val paint = Paint().apply {
-        color = Color.GREEN // Сделал зеленым для разнообразия (как в матрице)
+        color = Color.GREEN
         style = Paint.Style.FILL
     }
 
