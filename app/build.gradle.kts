@@ -7,7 +7,9 @@ android {
     namespace = "com.uw5ent.acousticlab"
     compileSdk = 34
 ndkVersion = "25.1.8937393"
-
+buildFeatures {
+    prefab = true
+}
     defaultConfig {
         applicationId = "com.uw5ent.acousticlab"
         minSdk = 26
