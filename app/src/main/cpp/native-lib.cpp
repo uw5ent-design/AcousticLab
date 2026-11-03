@@ -23,14 +23,10 @@ private:
     std::uniform_real_distribution<float> dis;
     
     float fftOutput[FFT_BANDS];
-    
-    // Раздельные ползунки громкости
     std::atomic<float> noiseVolume_{0.5f}; 
     std::atomic<float> micVolume_{0.5f};   
-    
     std::atomic<bool> filterEnabled_{true};
     
-    // Noise Reduction параметры
     std::atomic<bool> isLearning_{false};
     std::atomic<bool> isReducing_{false};
     std::atomic<float> scale_{1.0f};      
@@ -38,13 +34,11 @@ private:
     std::vector<float> noiseProfile;
     int learnFramesCounter = 0;
 
-    // Буферы для FFT (Overlap-Add)
     std::vector<float> inputBuffer;
     std::vector<float> outputBuffer;
     int bufferIndex = 0;
     float window[FFT_SIZE];
 
-    // Запись
     std::atomic<bool> isRecording_{false};
     std::vector<float> recordedBuffer;
 
@@ -128,12 +122,12 @@ public:
         float mVol = micVolume_.load();
         bool useFilters = filterEnabled_.load();
         bool reducing = isReducing_.load();
+        bool learning = isLearning_.load();
 
         for (int i = 0; i < numFrames; ++i) {
             float mic = (i < framesRead) ? micData[i] : 0.0f;
             float noise = dis(gen) * 0.5f; 
             
-            // Независимое смешивание
             float mixed = (noise * nVol) + (mic * mVol); 
 
             if (useFilters) {
@@ -141,13 +135,22 @@ public:
                 mixed = bandpass.process(mixed);
             }
 
+            // Всегда пишем в буфер (чтобы не было разрывов при включении)
             inputBuffer[FFT_SIZE - HOP_SIZE + bufferIndex] = mixed;
-            float outSample = outputBuffer[bufferIndex];
+            
+            // Если шумодав ВКЛЮЧЕН, берем звук из обработанного буфера.
+            // Если ВЫКЛЮЧЕН - звук идет напрямую (чистый шум без жужжания).
+            if (reducing || learning) {
+                floatData[i] = outputBuffer[bufferIndex];
+            } else {
+                floatData[i] = mixed;
+            }
+            
             bufferIndex++;
 
             if (bufferIndex >= HOP_SIZE) {
-                processSTFT(reducing, isLearning_.load());
-                if (isLearning_.load()) {
+                processSTFT(reducing, learning);
+                if (learning) {
                     learnFramesCounter++;
                     if (learnFramesCounter > 50) isLearning_.store(false);
                 }
@@ -158,7 +161,6 @@ public:
                 }
                 for(int j=FFT_SIZE-HOP_SIZE; j<FFT_SIZE; j++) outputBuffer[j] = 0.0f;
             }
-            floatData[i] = outSample;
         }
 
         if (isRecording_.load()) {
@@ -211,14 +213,17 @@ public:
                 noiseProfile[k] = std::max(noiseProfile[k], mag);
             } else if (reducing) {
                 float subtractValue = noiseProfile[k] * currentScale;
-                if (mag > subtractValue + currentThreshold) {
-                    float cleanMag = mag - subtractValue;
-                    float phase = atan2f(imag[k], real[k]);
-                    real[k] = cleanMag * cosf(phase);
-                    imag[k] = cleanMag * sinf(phase);
-                } else {
-                    real[k] = 0; imag[k] = 0; 
+                
+                // 10% Spectral Floor (убирает жужжание)
+                float cleanMag = std::max(mag - subtractValue, mag * 0.1f);
+                
+                if (mag < currentThreshold) {
+                    cleanMag = mag * 0.02f; 
                 }
+                
+                float phase = atan2f(imag[k], real[k]);
+                real[k] = cleanMag * cosf(phase);
+                imag[k] = cleanMag * sinf(phase);
             }
         }
         
@@ -230,7 +235,8 @@ public:
         fft(real, imag, true);
 
         for (int i = 0; i < FFT_SIZE; ++i) {
-            outputBuffer[i] += real[i] * window[i] * 2.0f; 
+            // Коэффициент 0.66 правильный для Hann окна с 50% перекрытием
+            outputBuffer[i] += real[i] * window[i] * 0.66f; 
         }
     }
 
@@ -252,7 +258,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Dual Mixer + FFT + NR."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Anti-Buzz Active."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
