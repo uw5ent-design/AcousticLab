@@ -9,7 +9,8 @@
 
 class AudioEngine : public oboe::AudioStreamCallback {
 private:
-    std::shared_ptr<oboe::AudioStream> mStream;
+    std::shared_ptr<oboe::AudioStream> mOutputStream;
+    std::shared_ptr<oboe::AudioStream> mInputStream;
     std::mt19937 gen;
     std::uniform_real_distribution<float> dis;
 
@@ -17,52 +18,75 @@ public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {}
 
     bool start() {
-        oboe::AudioStreamBuilder builder;
-        builder.setDirection(oboe::Direction::Output)
-               ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-               ->setSharingMode(oboe::SharingMode::Exclusive)
-               ->setFormat(oboe::AudioFormat::Float)
-               ->setChannelCount(oboe::ChannelCount::Mono)
-               ->setDataCallback(this);
-
-        oboe::Result result = builder.openStream(mStream);
+        // 1. Настраиваем ВХОД (Микрофон - Канал Б)
+        oboe::AudioStreamBuilder inputBuilder;
+        inputBuilder.setDirection(oboe::Direction::Input)
+                    ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+                    ->setSharingMode(oboe::SharingMode::Exclusive)
+                    ->setFormat(oboe::AudioFormat::Float)
+                    ->setChannelCount(oboe::ChannelCount::Mono);
+        
+        oboe::Result result = inputBuilder.openStream(mInputStream);
         if (result != oboe::Result::OK) {
-            LOGI("Error opening stream: %s", oboe::convertToText(result));
+            LOGI("Error opening input stream: %s", oboe::convertToText(result));
             return false;
         }
 
-        mStream->requestStart();
-        LOGI("Audio Engine Started");
+        // 2. Настраиваем ВЫХОД (Динамик)
+        oboe::AudioStreamBuilder outputBuilder;
+        outputBuilder.setDirection(oboe::Direction::Output)
+                     ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+                     ->setSharingMode(oboe::SharingMode::Exclusive)
+                     ->setFormat(oboe::AudioFormat::Float)
+                     ->setChannelCount(oboe::ChannelCount::Mono)
+                     ->setDataCallback(this);
+
+        result = outputBuilder.openStream(mOutputStream);
+        if (result != oboe::Result::OK) {
+            LOGI("Error opening output stream: %s", oboe::convertToText(result));
+            return false;
+        }
+
+        mInputStream->requestStart();
+        mOutputStream->requestStart();
+        LOGI("Audio Engine Started (Mic + Noise)");
         return true;
     }
 
     void stop() {
-        if (mStream) {
-            mStream->stop();
-            mStream->close();
-            mStream.reset();
-            LOGI("Audio Engine Stopped");
-        }
+        if (mInputStream) { mInputStream->stop(); mInputStream->close(); mInputStream.reset(); }
+        if (mOutputStream) { mOutputStream->stop(); mOutputStream->close(); mOutputStream.reset(); }
+        LOGI("Audio Engine Stopped");
     }
 
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream *oboeStream, void *audioData, int32_t numFrames) override {
         auto *floatData = static_cast<float *>(audioData);
         
-        // Генерируем белый шум (Канал А)
+        // Читаем данные с микрофона
+        float micData[1024];
+        int32_t framesRead = 0;
+        if (mInputStream) {
+            mInputStream->read(micData, numFrames, 0); // 0 = non-blocking
+        }
+
+        // Смешиваем: Микрофон + Белый шум
         for (int i = 0; i < numFrames; ++i) {
-            floatData[i] = dis(gen) * 0.1f; // 0.1f - это громкость
+            float mic = (i < framesRead) ? micData[i] : 0.0f;
+            float noise = dis(gen) * 0.05f; // Убавил громкость шума, чтобы не глушил микрофон
+            
+            // Канал А (шум) * 0.5 + Канал Б (микрофон) * 0.5
+            floatData[i] = (noise * 0.5f) + (mic * 0.5f); 
         }
         
         return oboe::DataCallbackResult::Continue;
     }
 };
 
-// Создаем глобальный экземпляр движка
 AudioEngine engine;
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject /* this */) {
-    std::string status = "DSP Engine: Ready. Oboe initialized.";
+    std::string status = "DSP Engine: Ready. Mic + Noise.";
     return env->NewStringUTF(status.c_str());
 }
 
