@@ -9,7 +9,10 @@
 
 #define LOG_TAG "AcousticDSP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-#define FFT_SIZE 512
+
+// Уменьшили размер FFT для скорости, 256 сэмплов = ~5 мс
+#define FFT_SIZE 256
+#define HOP_SIZE 128
 #define FFT_BANDS 64
 
 class AudioEngine : public oboe::AudioStreamCallback {
@@ -23,18 +26,22 @@ private:
     std::atomic<float> mixRatio_{0.5f};
     std::atomic<bool> filterEnabled_{true};
     
-    // Параметры для Noise Reduction
+    // Переменные для Noise Reduction
     std::atomic<bool> isLearning_{false};
     std::atomic<bool> isReducing_{false};
-    std::vector<float> noiseProfile; // Профиль шума
+    std::vector<float> noiseProfile;
     int learnFramesCounter = 0;
 
-    // Буферы для STFT (Overlap-Add)
+    // Буферы и таблицы для БЫСТРОГО STFT
     std::vector<float> inputBuffer;
-    std::vector<float> outputBuffer;
+    std::vector<float> overlapBuffer;
     int bufferIndex = 0;
 
-    // Фильтры (Bandpass и Notch)
+    float dft_cos[FFT_SIZE][FFT_SIZE];
+    float dft_sin[FFT_SIZE][FFT_SIZE];
+    float window[FFT_SIZE];
+
+    // Фильтры
     struct Biquad {
         float b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0;
         float z1 = 0, z2 = 0;
@@ -45,14 +52,24 @@ private:
             return y;
         }
     };
-    Biquad bandpass, notch50, notch100;
+    Biquad bandpass, notch50;
 
 public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
         noiseProfile.resize(FFT_SIZE / 2 + 1, 0.0f);
         inputBuffer.resize(FFT_SIZE, 0.0f);
-        outputBuffer.resize(FFT_SIZE, 0.0f);
+        overlapBuffer.resize(FFT_SIZE, 0.0f);
+        
+        // Предрасчет окон и таблиц синусов/косинусов (для ускорения)
+        for (int i = 0; i < FFT_SIZE; ++i) {
+            window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
+            for (int j = 0; j < FFT_SIZE; ++j) {
+                float angle = 2.0f * M_PI * i * j / FFT_SIZE;
+                dft_cos[i][j] = cosf(angle);
+                dft_sin[i][j] = -sinf(angle);
+            }
+        }
         initFilters();
     }
 
@@ -125,80 +142,89 @@ public:
         }
 
         float currentMix = mixRatio_.load(std::memory_order_relaxed);
-        float micVol = currentMix;
-        float noiseVol = 1.0f - currentMix;
         bool useFilters = filterEnabled_.load(std::memory_order_relaxed);
         bool reducing = isReducing_.load(std::memory_order_relaxed);
 
         for (int i = 0; i < numFrames; ++i) {
             float mic = (i < framesRead) ? micData[i] : 0.0f;
-            float noise = dis(gen) * 0.1f; 
-            float mixed = (noise * noiseVol) + (mic * micVol); 
+            float mixed = mic * currentMix; 
 
             if (useFilters) {
                 mixed = notch50.process(mixed);
                 mixed = bandpass.process(mixed);
             }
 
-            // --- SPECTRAL SUBTRACTION (STFT) ---
+            // --- ПРАВИЛЬНЫЙ OVERLAP-ADD ---
             inputBuffer[bufferIndex] = mixed;
-            float outSample = outputBuffer[bufferIndex];
+            
+            // Берем уже готовый сэмпл из перекрытия и очищаем место для будущего
+            float outSample = overlapBuffer[bufferIndex];
+            overlapBuffer[bufferIndex] = 0.0f; 
+            
             bufferIndex++;
 
-            if (bufferIndex >= FFT_SIZE) {
-                bufferIndex = 0;
+            // Если набрали HOP_SIZE, запускаем просчет блока FFT_SIZE
+            if (bufferIndex >= HOP_SIZE) {
                 processSTFT(reducing, isLearning_.load(std::memory_order_relaxed));
                 if (isLearning_.load(std::memory_order_relaxed)) {
                     learnFramesCounter++;
-                    if (learnFramesCounter > 20) isLearning_.store(false, std::memory_order_relaxed); // ~1 секунда
+                    if (learnFramesCounter > 50) isLearning_.store(false, std::memory_order_relaxed); // ~2 сек
                 }
+                bufferIndex = 0;
             }
-            floatData[i] = outSample;
+            
+            // Умножаем на 4.0f, чтобы компенсировать тишину после FFT
+            floatData[i] = outSample * 4.0f; 
         }
 
-        // Обновляем визуализатор
         updateVisualizer(floatData, numFrames);
         return oboe::DataCallbackResult::Continue;
     }
 
     void processSTFT(bool reducing, bool learning) {
-        // Применяем оконную функцию Ханна (чтобы не было щелчков)
+        // Копируем последние FFT_SIZE сэмплов и применяем окно
+        std::vector<float> fftBuf(FFT_SIZE, 0.0f);
         for (int i = 0; i < FFT_SIZE; ++i) {
-            float w = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
-            inputBuffer[i] *= w;
+            int idx = (bufferIndex + i) % FFT_SIZE;
+            fftBuf[i] = inputBuffer[idx] * window[i];
         }
 
-        // Здесь упрощенный DFT/IDFT (чтобы не подключать сторонние библиотеки)
         std::vector<float> real(FFT_SIZE, 0), imag(FFT_SIZE, 0);
-        for (int k = 0; k < FFT_SIZE / 2 + 1; ++k) {
+        
+        // Прямое FFT (с использованием таблиц)
+        for (int k = 0; k < FFT_SIZE; ++k) {
             for (int n = 0; n < FFT_SIZE; ++n) {
-                float angle = 2.0f * M_PI * k * n / FFT_SIZE;
-                real[k] += inputBuffer[n] * cosf(angle);
-                imag[k] -= inputBuffer[n] * sinf(angle);
+                real[k] += fftBuf[n] * dft_cos[k][n];
+                imag[k] += fftBuf[n] * dft_sin[k][n];
             }
-            float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
             
-            if (learning) {
-                noiseProfile[k] = std::max(noiseProfile[k], mag); // Запоминаем максимум шума
-            } else if (reducing) {
-                // Вычитаем шум (оставляем минимум 5% от оригинала, чтобы не было "музыкального шума")
-                float cleanMag = std::max(mag - noiseProfile[k], mag * 0.05f);
-                float phase = atan2f(imag[k], real[k]);
-                real[k] = cleanMag * cosf(phase);
-                imag[k] = cleanMag * sinf(phase);
+            if (k <= FFT_SIZE / 2) {
+                float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
+                if (learning) {
+                    noiseProfile[k] = std::max(noiseProfile[k], mag);
+                } else if (reducing) {
+                    float cleanMag = std::max(mag - noiseProfile[k] * 1.5f, mag * 0.05f); // Агрессивное вычитание
+                    float phase = atan2f(imag[k], real[k]);
+                    real[k] = cleanMag * cosf(phase);
+                    imag[k] = cleanMag * sinf(phase);
+                }
             }
         }
 
-        // Обратное преобразование (IDFT)
+        // Обратное FFT
         for (int n = 0; n < FFT_SIZE; ++n) {
             float val = 0;
             for (int k = 0; k < FFT_SIZE; ++k) {
-                float angle = 2.0f * M_PI * k * n / FFT_SIZE;
-                val += real[k] * cosf(angle) - imag[k] * sinf(angle);
+                // Используем симметрию
+                float cosVal = dft_cos[k][n]; 
+                float sinVal = -dft_sin[k][n]; // Инвертируем знак для обратного
+                val += real[k] * cosVal + imag[k] * sinVal;
             }
             val /= FFT_SIZE;
-            // Overlap-Add (сохраняем во второй половине, чтобы избежать разрывов)
-            outputBuffer[n] = val * 0.5f; 
+            
+            // Применяем окно и складываем в буфер перекрытия (Overlap-Add)
+            int outIdx = (bufferIndex + n) % FFT_SIZE;
+            overlapBuffer[outIdx] += val * window[n];
         }
     }
 
@@ -224,7 +250,7 @@ AudioEngine engine;
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) {
-    return env->NewStringUTF("DSP Engine: Ready. Noise Reduction Active.");
+    return env->NewStringUTF("DSP Engine: Ready. Fast Noise Reduction.");
 }
 
 extern "C" JNIEXPORT jboolean JNICALL
