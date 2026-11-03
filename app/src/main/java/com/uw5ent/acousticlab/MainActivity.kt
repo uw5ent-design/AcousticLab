@@ -37,6 +37,7 @@ class MainActivity : AppCompatActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var spectrogramView: SpectrogramView? = null
     private var recordPath: String = ""
+    private var isRecording = false // Состояние записи
 
     private val updateRunnable = object : Runnable {
         override fun run() {
@@ -74,10 +75,19 @@ class MainActivity : AppCompatActivity() {
             })
         }
 
+        // --- ВКЛ / ВЫКЛ МИКРОФОНА ---
+        val micEnableCheckBox = CheckBox(this).apply {
+            text = "Микрофон ВКЛ/ВЫКЛ"
+            isChecked = true
+            setOnCheckedChangeListener { _, isChecked -> 
+                setMicVolume(if (isChecked) 1.0f else 0.0f) 
+            }
+        }
+
         // --- ГРОМКОСТЬ МИКРОФОНА ---
-        val micVolText = TextView(this).apply { text = "Громкость Микрофона: 50%" }
+        val micVolText = TextView(this).apply { text = "Громкость Микрофона: 100%" }
         val micVolSlider = SeekBar(this).apply {
-            max = 100; progress = 50 
+            max = 100; progress = 100 
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
                     setMicVolume(p / 100.0f); micVolText.text = "Громкость Микрофона: $p%" 
@@ -124,17 +134,21 @@ class MainActivity : AppCompatActivity() {
             })
         }
 
-        // --- ЗАПИСЬ ---
-        val btnRecord = Button(this).apply {
+        // --- ЗАПИСЬ (ОДНА КНОПКА) ---
+        val btnRecordToggle = Button(this).apply {
             text = "Начать запись"
-            setOnClickListener { startRecording(); text = "Идет запись..." }
-        }
-        val btnStopRecord = Button(this).apply {
-            text = "Сохранить запись"
             setOnClickListener {
-                stopRecording(recordPath)
-                btnRecord.text = "Начать запись"
-                Toast.makeText(context, "Сохранено в $recordPath", Toast.LENGTH_LONG).show()
+                if (!isRecording) {
+                    startRecording()
+                    text = "Остановить и Сохранить"
+                    isRecording = true
+                    Toast.makeText(context, "Запись пошла...", Toast.LENGTH_SHORT).show()
+                } else {
+                    stopRecording(recordPath)
+                    text = "Начать запись"
+                    isRecording = false
+                    Toast.makeText(context, "Сохранено в $recordPath", Toast.LENGTH_LONG).show()
+                }
             }
         }
 
@@ -148,6 +162,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(textView)
         layout.addView(noiseVolText)
         layout.addView(noiseVolSlider)
+        layout.addView(micEnableCheckBox) // Переключатель
         layout.addView(micVolText)
         layout.addView(micVolSlider)
         layout.addView(filterCheckBox)
@@ -157,8 +172,7 @@ class MainActivity : AppCompatActivity() {
         layout.addView(scaleSlider)
         layout.addView(thText)
         layout.addView(thSlider)
-        layout.addView(btnRecord)
-        layout.addView(btnStopRecord)
+        layout.addView(btnRecordToggle) // Одна кнопка
         layout.addView(spectrogramView)
         layout.addView(btnStart)
         layout.addView(btnStop)
