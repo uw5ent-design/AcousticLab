@@ -14,10 +14,6 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
 
@@ -27,34 +23,38 @@ class MainActivity : AppCompatActivity() {
     external fun startAudio(): Boolean
     external fun stopAudio()
     external fun getFftData(outArray: FloatArray)
-    external fun setMixRatio(ratio: Float)
+    external fun setNoiseVolume(vol: Float)
+    external fun setMicVolume(vol: Float)
     external fun setFilterEnabled(enabled: Boolean)
-    external fun startLearning() // НОВЫЙ
-    external fun setNoiseReduction(enabled: Boolean) // НОВЫЙ
+    external fun startLearning()
+    external fun setNoiseReduction(enabled: Boolean)
+    external fun setScale(scale: Float)
+    external fun setThreshold(th: Float)
+    external fun startRecording()
+    external fun stopRecording(path: String)
 
     private val fftBuffer = FloatArray(64)
     private val handler = Handler(Looper.getMainLooper())
     private var spectrogramView: SpectrogramView? = null
-    private var logFile: File? = null
-    private val ANOMALY_THRESHOLD = 85.0f
+    private var recordPath: String = ""
 
     private val updateRunnable = object : Runnable {
         override fun run() {
             getFftData(fftBuffer)
             spectrogramView?.updateFft(fftBuffer)
-            checkForAnomalies()
             handler.postDelayed(this, 33) 
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        logFile = File(getExternalFilesDir(null), "dsp_anomalies_log.json")
+        recordPath = File(getExternalFilesDir(null), "record.raw").absolutePath
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1)
         }
 
+        val scrollView = ScrollView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(30, 30, 30, 30)
@@ -62,82 +62,109 @@ class MainActivity : AppCompatActivity() {
 
         val textView = TextView(this).apply { textSize = 16f; text = getDspStatus() }
 
-        val mixerSlider = SeekBar(this).apply {
+        // --- ГРОМКОСТЬ ШУМА ---
+        val noiseVolText = TextView(this).apply { text = "Громкость Шума: 50%" }
+        val noiseVolSlider = SeekBar(this).apply {
             max = 100; progress = 50 
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { setMixRatio(p / 100.0f) }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}
-                override fun onStopTrackingTouch(sb: SeekBar?) {}
+                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
+                    setNoiseVolume(p / 100.0f); noiseVolText.text = "Громкость Шума: $p%" 
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}; override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+
+        // --- ГРОМКОСТЬ МИКРОФОНА ---
+        val micVolText = TextView(this).apply { text = "Громкость Микрофона: 50%" }
+        val micVolSlider = SeekBar(this).apply {
+            max = 100; progress = 50 
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
+                    setMicVolume(p / 100.0f); micVolText.text = "Громкость Микрофона: $p%" 
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}; override fun onStopTrackingTouch(sb: SeekBar?) {}
             })
         }
 
         val filterCheckBox = CheckBox(this).apply {
-            text = "DSP-фильтры (300-3400 Гц)"
-            isChecked = true 
+            text = "DSP-фильтры (Bandpass)"; isChecked = true 
             setOnCheckedChangeListener { _, isChecked -> setFilterEnabled(isChecked) }
         }
 
-        // КНОПКА ЗАХВАТА ШУМА
+        // --- NOISE REDUCTION ---
         val btnLearn = Button(this).apply {
-            text = "1. Захватить шум фона (молчите 2 сек)"
-            setOnClickListener {
-                startLearning()
-                Toast.makeText(context, "Слушаю фон...", Toast.LENGTH_SHORT).show()
-            }
+            text = "1. Захватить шум фона"
+            setOnClickListener { startLearning(); Toast.makeText(context, "Слушаю фон...", Toast.LENGTH_SHORT).show() }
         }
 
-        // ГАЛОЧКА NOISE REDUCTION
         val noiseReductionCheckBox = CheckBox(this).apply {
-            text = "2. Включить Noise Reduction (GoldWave)"
-            isChecked = false
+            text = "2. Включить Noise Reduction"; isChecked = false
             setOnCheckedChangeListener { _, isChecked -> setNoiseReduction(isChecked) }
         }
 
+        val scaleText = TextView(this).apply { text = "Scale (Агрессивность): 100%" }
+        val scaleSlider = SeekBar(this).apply {
+            max = 300; progress = 100
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
+                    setScale(p / 100.0f); scaleText.text = "Scale: $p%" 
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}; override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+
+        val thText = TextView(this).apply { text = "Threshold (Порог): 10%" }
+        val thSlider = SeekBar(this).apply {
+            max = 100; progress = 10
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
+                    setThreshold(p / 100.0f); thText.text = "Threshold: $p%" 
+                }
+                override fun onStartTrackingTouch(sb: SeekBar?) {}; override fun onStopTrackingTouch(sb: SeekBar?) {}
+            })
+        }
+
+        // --- ЗАПИСЬ ---
+        val btnRecord = Button(this).apply {
+            text = "Начать запись"
+            setOnClickListener { startRecording(); text = "Идет запись..." }
+        }
+        val btnStopRecord = Button(this).apply {
+            text = "Сохранить запись"
+            setOnClickListener {
+                stopRecording(recordPath)
+                btnRecord.text = "Начать запись"
+                Toast.makeText(context, "Сохранено в $recordPath", Toast.LENGTH_LONG).show()
+            }
+        }
+
         spectrogramView = SpectrogramView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 400)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 300)
         }
 
-        val btnStart = Button(this).apply {
-            text = "Включить Микшер"
-            setOnClickListener { text = if (startAudio()) "Микшер работает!" else "Ошибка" }
-        }
-
-        val btnStop = Button(this).apply {
-            text = "Остановить"
-            setOnClickListener { stopAudio(); text = "Остановлено" }
-        }
+        val btnStart = Button(this).apply { text = "Включить систему"; setOnClickListener { text = if (startAudio()) "Работает!" else "Ошибка" } }
+        val btnStop = Button(this).apply { text = "Остановить"; setOnClickListener { stopAudio(); text = "Стоп" } }
 
         layout.addView(textView)
-        layout.addView(TextView(this).apply { text = "Баланс (Шум <---> Микрофон):" })
-        layout.addView(mixerSlider)
+        layout.addView(noiseVolText)
+        layout.addView(noiseVolSlider)
+        layout.addView(micVolText)
+        layout.addView(micVolSlider)
         layout.addView(filterCheckBox)
         layout.addView(btnLearn)
         layout.addView(noiseReductionCheckBox)
+        layout.addView(scaleText)
+        layout.addView(scaleSlider)
+        layout.addView(thText)
+        layout.addView(thSlider)
+        layout.addView(btnRecord)
+        layout.addView(btnStopRecord)
         layout.addView(spectrogramView)
         layout.addView(btnStart)
         layout.addView(btnStop)
         
-        setContentView(layout)
-    }
-
-    private var lastLogTime = 0L
-    private fun checkForAnomalies() {
-        var maxIdx = 0; var maxMag = 0.0f
-        for (i in fftBuffer.indices) {
-            if (fftBuffer[i] > maxMag) { maxMag = fftBuffer[i]; maxIdx = i }
-        }
-        val currentTime = System.currentTimeMillis()
-        if (maxMag > ANOMALY_THRESHOLD && currentTime - lastLogTime > 1000) {
-            lastLogTime = currentTime
-            val freqHz = maxIdx * (24000.0f / 64.0f)
-            val rnd = Random.nextInt(1000, 9999)
-            val ts = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(currentTime))
-            val json = """{"ts": "$ts", "random": $rnd, "peak_freq_hz": ${String.format("%.1f", freqHz)}, "magnitude": ${String.format("%.1f", maxMag)}}"""
-            try {
-                logFile?.appendText(json + "\n")
-                runOnUiThread { Toast.makeText(this, "Аномалия! ${freqHz.toInt()} Гц", Toast.LENGTH_SHORT).show() }
-            } catch (e: Exception) { e.printStackTrace() }
-        }
+        scrollView.addView(layout)
+        setContentView(scrollView)
     }
 
     override fun onResume() { super.onResume(); handler.post(updateRunnable) }
