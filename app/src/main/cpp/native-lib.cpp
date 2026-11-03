@@ -22,7 +22,7 @@ public:
         oboe::AudioStreamBuilder inputBuilder;
         inputBuilder.setDirection(oboe::Direction::Input)
                     ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
-                    ->setSharingMode(oboe::SharingMode::Exclusive)
+                    ->setSharingMode(oboe::SharingMode::Shared) // Shared надежнее для одновременной работы с выходом
                     ->setFormat(oboe::AudioFormat::Float)
                     ->setChannelCount(oboe::ChannelCount::Mono);
         
@@ -66,16 +66,21 @@ public:
         float micData[1024];
         int32_t framesRead = 0;
         if (mInputStream) {
-            mInputStream->read(micData, numFrames, 0); // 0 = non-blocking
+            // ВОТ ЗДЕСЬ ИСПРАВЛЕНИЕ: сохраняем результат в result
+            auto result = mInputStream->read(micData, numFrames, 0); 
+            if (result) {
+                framesRead = result.value();
+            }
         }
 
         // Смешиваем: Микрофон + Белый шум
         for (int i = 0; i < numFrames; ++i) {
             float mic = (i < framesRead) ? micData[i] : 0.0f;
-            float noise = dis(gen) * 0.05f; // Убавил громкость шума, чтобы не глушил микрофон
+            float noise = dis(gen) * 0.05f; 
             
-            // Канал А (шум) * 0.5 + Канал Б (микрофон) * 0.5
-            floatData[i] = (noise * 0.5f) + (mic * 0.5f); 
+            // Канал А (шум) * 0.3 + Канал Б (микрофон) * 0.7 
+            // Сделал микрофон громче, чтобы ты его точно услышал
+            floatData[i] = (noise * 0.3f) + (mic * 0.7f); 
         }
         
         return oboe::DataCallbackResult::Continue;
