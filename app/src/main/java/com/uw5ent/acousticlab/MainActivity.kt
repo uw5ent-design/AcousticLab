@@ -14,9 +14,15 @@ import android.widget.CheckBox
 import android.widget.LinearLayout
 import android.widget.SeekBar
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import kotlin.random.Random
 
 class MainActivity : AppCompatActivity() {
 
@@ -29,16 +35,24 @@ class MainActivity : AppCompatActivity() {
     external fun stopAudio()
     external fun getFftData(outArray: FloatArray)
     external fun setMixRatio(ratio: Float)
-    external fun setFilterEnabled(enabled: Boolean) // Новый метод
+    external fun setFilterEnabled(enabled: Boolean)
 
     private val fftBuffer = FloatArray(64)
     private val handler = Handler(Looper.getMainLooper())
     private var spectrogramView: SpectrogramView? = null
+    private var logFile: File? = null
+
+    // Порог аномалии (если столбик выше 85 из 100, считаем это аномалией)
+    private val ANOMALY_THRESHOLD = 85.0f
 
     private val updateRunnable = object : Runnable {
         override fun run() {
             getFftData(fftBuffer)
             spectrogramView?.updateFft(fftBuffer)
+            
+            // АНАЛИЗ АНОМАЛИЙ
+            checkForAnomalies()
+            
             handler.postDelayed(this, 33) 
         }
     }
@@ -46,6 +60,9 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // Создаем файл для логов во внутренней памяти приложения
+        logFile = File(getExternalFilesDir(null), "dsp_anomalies_log.json")
+
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 1)
         }
@@ -57,7 +74,7 @@ class MainActivity : AppCompatActivity() {
 
         val textView = TextView(this).apply {
             textSize = 16f
-            text = getDspStatus()
+            text = getDspStatus() + "\nЛог-файл: " + logFile?.absolutePath
         }
 
         val mixerSlider = SeekBar(this).apply {
@@ -72,10 +89,9 @@ class MainActivity : AppCompatActivity() {
             })
         }
 
-        // ДОБАВЛЯЕМ ГАЛОЧКУ ДЛЯ ФИЛЬТРОВ
         val filterCheckBox = CheckBox(this).apply {
-            text = "Включить DSP-фильтры (300-3400 Гц)"
-            isChecked = true // По умолчанию включено
+            text = "DSP-фильтры (300-3400 Гц)"
+            isChecked = true 
             setOnCheckedChangeListener { _, isChecked ->
                 setFilterEnabled(isChecked)
             }
@@ -107,12 +123,51 @@ class MainActivity : AppCompatActivity() {
         layout.addView(textView)
         layout.addView(TextView(this).apply { text = "Баланс (Шум <---> Микрофон):" })
         layout.addView(mixerSlider)
-        layout.addView(filterCheckBox)
+        layout.addView(filterCheckBox) 
         layout.addView(spectrogramView)
         layout.addView(btnStart)
         layout.addView(btnStop)
         
         setContentView(layout)
+    }
+
+    // Логика поиска пиков и записи в JSON
+    private var lastLogTime = 0L
+    private fun checkForAnomalies() {
+        // Находим максимальный пик в спектре
+        var maxIndex = 0
+        var maxMagnitude = 0.0f
+        
+        for (i in fftBuffer.indices) {
+            if (fftBuffer[i] > maxMagnitude) {
+                maxMagnitude = fftBuffer[i]
+                maxIndex = i
+            }
+        }
+
+        // Если пик превышает порог (и прошло больше 1 секунды с прошлой записи)
+        val currentTime = System.currentTimeMillis()
+        if (maxMagnitude > ANOMALY_THRESHOLD && currentTime - lastLogTime > 1000) {
+            lastLogTime = currentTime
+            
+            // Рассчитываем примерную частоту (предполагаем 48кГц частоту дискретизации)
+            // 64 полосы охватывают диапазон от 0 до 24000 Гц
+            val frequencyHz = maxIndex * (24000.0f / 64.0f)
+            val randomNum = Random.nextInt(1000, 9999)
+            val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(Date(currentTime))
+
+            // Формируем JSON строку
+            val jsonString = """{"ts": "$timestamp", "random": $randomNum, "peak_freq_hz": ${String.format("%.1f", frequencyHz)}, "magnitude": ${String.format("%.1f", maxMagnitude)}}"""
+
+            try {
+                logFile?.appendText(jsonString + "\n")
+                runOnUiThread {
+                    Toast.makeText(this, "Аномалия! ${frequencyHz.toInt()} Гц", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
     }
 
     override fun onResume() {
