@@ -38,8 +38,6 @@ private:
     std::vector<float> outputBuffer;
     int bufferIndex = 0;
     float window[FFT_SIZE];
-    
-    std::vector<float> smoothGain;
 
     std::atomic<bool> isRecording_{false};
     std::vector<float> recordedBuffer;
@@ -59,7 +57,6 @@ public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
         noiseProfile.resize(FFT_SIZE / 2 + 1, 0.0f);
-        smoothGain.resize(FFT_SIZE / 2 + 1, 1.0f);
         
         inputBuffer.resize(FFT_SIZE, 0.0f);
         outputBuffer.resize(FFT_SIZE, 0.0f);
@@ -208,6 +205,9 @@ public:
         float currentScale = scale_.load();
         float currentThreshold = threshold_.load();
 
+        // Жесткий порог: переводим проценты (0.0 - 1.0) в масштаб FFT
+        float hardThreshold = currentThreshold * 150.0f; 
+
         for (int k = 0; k <= FFT_SIZE / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
             
@@ -216,30 +216,30 @@ public:
             } 
             
             if (reducing && !learning) {
-                float targetGain = 1.0f;
-                // ТЕРМИНАТОР: Умножаем Scale на 5.0 для максимально жесткого среза
-                float subtractValue = noiseProfile[k] * (currentScale * 5.0f);
+                // Вычитаем шум с учетом Scale
+                float subtractValue = noiseProfile[k] * currentScale;
                 
-                if (mag > subtractValue) {
+                float targetGain = 0.0f;
+                
+                // Если сигнал громче вычитаемого шума И громче жесткого порога
+                if (mag > subtractValue && mag > hardThreshold) {
                     targetGain = (mag - subtractValue) / mag;
                 } else {
-                    // Оставляем всего 1%, чтобы сигнал визуально падал в ноль
-                    targetGain = 0.01f; 
+                    // ИНАЧЕ РУБИМ В НОЛЬ (жесткий срез)
+                    targetGain = 0.0f;
                 }
                 
-                // ЖЕСТКИЙ ПОРОГ: Если звук тише порога, вырубаем в абсолютный ноль
-                if (mag < currentThreshold) {
-                    targetGain = 0.0f; 
-                }
-                
-                // БЫСТРОЕ СГЛАЖИВАНИЕ (0.7/0.3 вместо 0.95/0.05), чтобы эффект был виден мгновенно
-                smoothGain[k] = 0.7f * smoothGain[k] + 0.3f * targetGain;
-                
-                real[k] *= smoothGain[k];
-                imag[k] *= smoothGain[k];
+                real[k] *= targetGain;
+                imag[k] *= targetGain;
             }
         }
         
+        // --- СГЛАЖИВАНИЕ ПО ЧАСТОТАМ (Убирает бульканье) ---
+        for (int k = 1; k < FFT_SIZE / 2; ++k) {
+            real[k] = real[k] * 0.6f + (real[k-1] + real[k+1]) * 0.2f;
+            imag[k] = imag[k] * 0.6f + (imag[k-1] + imag[k+1]) * 0.2f;
+        }
+
         for (int k = FFT_SIZE / 2 + 1; k < FFT_SIZE; ++k) {
             real[k] = real[FFT_SIZE - k];
             imag[k] = -imag[FFT_SIZE - k];
@@ -270,7 +270,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Terminator Mode (Aggressive Cut)."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Hard Gate Cut."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
