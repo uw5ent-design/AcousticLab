@@ -34,8 +34,6 @@ private:
     
     std::vector<float> noiseProfile;
     int learnFramesCounter = 0;
-    
-    // ИСПРАВЛЕНИЕ 1: Делаем флаг атомарным, чтобы аудио-поток его видел
     std::atomic<bool> hasLearned_{false}; 
 
     std::vector<float> inputBuffer;
@@ -151,7 +149,6 @@ public:
 
             inputBuffer[FFT_SIZE - HOP_SIZE + bufferIndex] = mixed;
             
-            // ИСПРАВЛЕНИЕ 2: Используем атомарный флаг
             if ((reducing || learning) && hasLearned_.load()) {
                 floatData[i] = outputBuffer[bufferIndex];
             } else {
@@ -164,7 +161,6 @@ public:
                 processSTFT(reducing, learning);
                 if (learning) {
                     learnFramesCounter++;
-                    // ИСПРАВЛЕНИЕ 3: Увеличиваем время захвата до реальных 2 секунд (~750 кадров)
                     if (learnFramesCounter > 750) isLearning_.store(false);
                 }
                 bufferIndex = 0;
@@ -220,8 +216,8 @@ public:
         float currentScale = scale_.load();
         float currentThreshold = threshold_.load();
 
-        // ИСПРАВЛЕНИЕ 4: Правильный масштаб порога для нашего FFT
-        float hardThreshold = currentThreshold * 300.0f; 
+        // ИСПРАВЛЕНИЕ: Уменьшили коэффициент со 300 до 40, чтобы порог работал по всей шкале
+        float hardThreshold = currentThreshold * 40.0f; 
 
         for (int k = 0; k <= FFT_SIZE / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
@@ -244,7 +240,6 @@ public:
                     targetGain = 0.0f; 
                 }
                 
-                // Плавное затухание, убирает щелчки
                 smoothGain[k] = 0.5f * smoothGain[k] + 0.5f * targetGain;
                 
                 real[k] *= smoothGain[k];
@@ -264,7 +259,6 @@ public:
 
         fft(real, imag, true);
 
-        // ИСПРАВЛЕНИЕ 5: Коэффициент 0.666f вместо 1.5f убирает щелчки и перегрузку
         for (int i = 0; i < FFT_SIZE; ++i) {
             outputBuffer[i] += real[i] * window[i] * 0.666f; 
         }
@@ -288,7 +282,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Fully Fixed & Calibrated."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Smooth Gate."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
