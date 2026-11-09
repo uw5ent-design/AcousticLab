@@ -1,9 +1,18 @@
 cmake_minimum_required(VERSION 3.22.1)
 project("acousticlab")
 
-# Ищем библиотеку Oboe, которую скачал Gradle
-find_package(oboe REQUIRED CONFIG)
+# 1. Подключаем модуль для скачивания библиотек
+include(FetchContent)
 
+# 2. Скачиваем libspecbleach прямо с GitHub во время сборки
+FetchContent_Declare(
+    specbleach
+    GIT_REPOSITORY https://github.com/lucianodato/libspecbleach.git
+    GIT_TAG main 
+)
+FetchContent_MakeAvailable(specbleach)
+
+# 3. Собираем нашу основную библиотеку
 add_library(
     acousticlab
     SHARED
@@ -15,9 +24,9 @@ find_library(
     log
 )
 
-# Линкуем нашу библиотеку с Oboe и логами
+# 4. Линкуем наш код с только что скачанной библиотекой шумодава
 target_link_libraries(
     acousticlab
-    oboe::oboe
+    specbleach
     ${log-lib}
 )
