@@ -39,8 +39,6 @@ private:
     int bufferIndex = 0;
     float window[FFT_SIZE];
     
-    // Сглаживание для борьбы с жужжанием
-    std::vector<float> prevGain;
     std::vector<float> smoothGain;
 
     std::atomic<bool> isRecording_{false};
@@ -61,7 +59,6 @@ public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
         noiseProfile.resize(FFT_SIZE / 2 + 1, 0.0f);
-        prevGain.resize(FFT_SIZE / 2 + 1, 1.0f);
         smoothGain.resize(FFT_SIZE / 2 + 1, 1.0f);
         
         inputBuffer.resize(FFT_SIZE, 0.0f);
@@ -219,25 +216,23 @@ public:
             } 
             
             if (reducing && !learning) {
-                // 1. Вычисляем "маску" громкости (Gain) от 0.0 до 1.0
                 float targetGain = 1.0f;
                 float subtractValue = noiseProfile[k] * currentScale;
                 
                 if (mag > subtractValue) {
                     targetGain = (mag - subtractValue) / mag;
                 } else {
-                    targetGain = 0.0f; 
+                    // СПЕКТРАЛЬНЫЙ ПОЛ: Никогда не глушим в ноль (оставляем 15%), чтобы не было гула!
+                    targetGain = 0.15f; 
                 }
                 
-                // Применяем Threshold (если сигнал тише порога, режем сильнее)
                 if (mag < currentThreshold) {
-                    targetGain *= 0.1f; 
+                    targetGain = std::min(targetGain, 0.15f); 
                 }
                 
-                // 2. Сглаживание во времени (убирает жужжание)
-                smoothGain[k] = 0.7f * smoothGain[k] + 0.3f * targetGain;
+                // СГЛАЖИВАНИЕ: Делаем переходы очень плавными (0.95 старого + 0.05 нового)
+                smoothGain[k] = 0.95f * smoothGain[k] + 0.05f * targetGain;
                 
-                // Применяем плавную маску к оригинальному сигналу (сохраняя фазу)
                 real[k] *= smoothGain[k];
                 imag[k] *= smoothGain[k];
             }
@@ -273,7 +268,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Smooth NR Mode."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: No-Hum Mode."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
