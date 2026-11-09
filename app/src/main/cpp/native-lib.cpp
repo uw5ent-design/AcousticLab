@@ -11,9 +11,8 @@
 #define LOG_TAG "AcousticDSP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
-// 75% перекрытие для чистого звука без гула
 #define FFT_SIZE 512
-#define HOP_SIZE 128   
+#define HOP_SIZE 128   // 75% перекрытие
 #define FFT_BANDS 64
 
 class AudioEngine : public oboe::AudioStreamCallback {
@@ -218,23 +217,23 @@ public:
             
             if (reducing && !learning) {
                 float targetGain = 1.0f;
-                // УСИЛЕНИЕ ВЫЧИТАНИЯ: умножаем Scale на 2.0f, чтобы срез был заметнее
-                float subtractValue = noiseProfile[k] * (currentScale * 2.0f);
+                // ТЕРМИНАТОР: Умножаем Scale на 5.0 для максимально жесткого среза
+                float subtractValue = noiseProfile[k] * (currentScale * 5.0f);
                 
                 if (mag > subtractValue) {
                     targetGain = (mag - subtractValue) / mag;
                 } else {
-                    // Глушим до 5% (вместо 15%), чтобы был эффект среза
-                    targetGain = 0.05f; 
-                }
-                
-                // ЖЕСТКИЙ ПОРОГ: Если звук тише Threshold, душим его почти в ноль
-                if (mag < currentThreshold) {
+                    // Оставляем всего 1%, чтобы сигнал визуально падал в ноль
                     targetGain = 0.01f; 
                 }
                 
-                // ПЛАВНОЕ СГЛАЖИВАНИЕ: Оставляем 0.95, чтобы не было гудения
-                smoothGain[k] = 0.95f * smoothGain[k] + 0.05f * targetGain;
+                // ЖЕСТКИЙ ПОРОГ: Если звук тише порога, вырубаем в абсолютный ноль
+                if (mag < currentThreshold) {
+                    targetGain = 0.0f; 
+                }
+                
+                // БЫСТРОЕ СГЛАЖИВАНИЕ (0.7/0.3 вместо 0.95/0.05), чтобы эффект был виден мгновенно
+                smoothGain[k] = 0.7f * smoothGain[k] + 0.3f * targetGain;
                 
                 real[k] *= smoothGain[k];
                 imag[k] *= smoothGain[k];
@@ -249,7 +248,6 @@ public:
         fft(real, imag, true);
 
         for (int i = 0; i < FFT_SIZE; ++i) {
-            // Нормализация для 75% перекрытия
             outputBuffer[i] += real[i] * window[i] * 1.5f; 
         }
     }
@@ -272,7 +270,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: WOLA 75% Aggressive."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Terminator Mode (Aggressive Cut)."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
