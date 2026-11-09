@@ -33,15 +33,13 @@ private:
     std::atomic<float> threshold_{0.05f}; 
     
     std::vector<float> noiseProfile;
-    float maxNoiseMag = 0.0f; // Максимальная громкость шума (для калибровки порога)
     int learnFramesCounter = 0;
+    bool hasLearned = false; // Флаг: был ли захват шума
 
     std::vector<float> inputBuffer;
     std::vector<float> outputBuffer;
     int bufferIndex = 0;
     float window[FFT_SIZE];
-
-    // Для сглаживания и борьбы со щелчками
     std::vector<float> smoothGain;
 
     std::atomic<bool> isRecording_{false};
@@ -91,7 +89,9 @@ public:
     void startLearning() { 
         isLearning_.store(true); 
         learnFramesCounter = 0; 
-        maxNoiseMag = 0.0f; // Сбрасываем старый максимум
+        hasLearned = true; // Разрешаем шумодаву работать
+        // Очищаем старый профиль
+        for(size_t i=0; i<noiseProfile.size(); i++) noiseProfile[i] = 0.0f;
     }
     
     void setReducing(bool enabled) { isReducing_.store(enabled); }
@@ -150,7 +150,8 @@ public:
 
             inputBuffer[FFT_SIZE - HOP_SIZE + bufferIndex] = mixed;
             
-            if (reducing || learning) {
+            // Если шумодав включен И мы уже захватили фон
+            if ((reducing || learning) && hasLearned) {
                 floatData[i] = outputBuffer[bufferIndex];
             } else {
                 floatData[i] = mixed;
@@ -217,39 +218,41 @@ public:
         float currentScale = scale_.load();
         float currentThreshold = threshold_.load();
 
+        // ПРОСТОЙ И ПОНЯТНЫЙ ПОРОГ: 100% = амплитуда 100
+        float hardThreshold = currentThreshold * 100.0f; 
+
         for (int k = 0; k <= FFT_SIZE / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
             
             if (learning) {
                 noiseProfile[k] = std::max(noiseProfile[k], mag);
-                if (mag > maxNoiseMag) maxNoiseMag = mag; // Запоминаем самый громкий пик шума
             } 
             
             if (reducing && !learning) {
-                // 1. Вычитаем шум с учетом Scale (до 3х раз сильнее)
-                float subtractValue = noiseProfile[k] * (currentScale * 2.0f);
+                // Вычитаем шум с учетом Scale
+                float subtractValue = noiseProfile[k] * currentScale;
+                float targetGain = 1.0f;
                 
-                // 2. Порог теперь привязан к максимальному шуму в комнате (0-100% шкалы)
-                float hardThreshold = maxNoiseMag * currentThreshold;
-                
-                float targetGain = 0.0f;
-                
-                // Если звук громче вычитаемого шума И громче нашего порога
-                if (mag > subtractValue && mag > hardThreshold) {
-                    targetGain = (mag - subtractValue) / mag;
+                if (mag < subtractValue) {
+                    targetGain = 0.0f; // Сигнал слабее шума - рубим
                 } else {
-                    targetGain = 0.0f; // Вырубаем
+                    targetGain = (mag - subtractValue) / mag;
+                }
+
+                // Жесткий порог (Noise Gate)
+                if (mag < hardThreshold) {
+                    targetGain = 0.0f; // Сигнал слабее порога - рубим
                 }
                 
-                // 3. СГЛАЖИВАНИЕ (убирает щелчки при резком выключении)
-                smoothGain[k] = 0.7f * smoothGain[k] + 0.3f * targetGain;
+                // БЫСТРОЕ СГЛАЖИВАНИЕ (убирает щелчки, но срабатывает мгновенно)
+                smoothGain[k] = 0.5f * smoothGain[k] + 0.5f * targetGain;
                 
                 real[k] *= smoothGain[k];
                 imag[k] *= smoothGain[k];
             }
         }
         
-        // Сглаживание по соседним частотам (убирает бульканье)
+        // Сглаживание по соседним частотам
         for (int k = 1; k < FFT_SIZE / 2; ++k) {
             real[k] = real[k] * 0.6f + (real[k-1] + real[k+1]) * 0.2f;
             imag[k] = imag[k] * 0.6f + (imag[k-1] + imag[k+1]) * 0.2f;
