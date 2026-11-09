@@ -12,7 +12,7 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define FFT_SIZE 512
-#define HOP_SIZE 128   // 75% перекрытие
+#define HOP_SIZE 128
 #define FFT_BANDS 64
 
 class AudioEngine : public oboe::AudioStreamCallback {
@@ -205,8 +205,8 @@ public:
         float currentScale = scale_.load();
         float currentThreshold = threshold_.load();
 
-        // Жесткий порог: переводим проценты (0.0 - 1.0) в масштаб FFT
-        float hardThreshold = currentThreshold * 150.0f; 
+        // РАСПРЕДЕЛЯЕМ ПОРОГ ПО ВСЕМУ ПОЛЗУНКУ (умножаем на 40 вместо 150)
+        float hardThreshold = currentThreshold * 40.0f; 
 
         for (int k = 0; k <= FFT_SIZE / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
@@ -216,17 +216,13 @@ public:
             } 
             
             if (reducing && !learning) {
-                // Вычитаем шум с учетом Scale
                 float subtractValue = noiseProfile[k] * currentScale;
-                
                 float targetGain = 0.0f;
                 
-                // Если сигнал громче вычитаемого шума И громче жесткого порога
                 if (mag > subtractValue && mag > hardThreshold) {
                     targetGain = (mag - subtractValue) / mag;
                 } else {
-                    // ИНАЧЕ РУБИМ В НОЛЬ (жесткий срез)
-                    targetGain = 0.0f;
+                    targetGain = 0.0f; // Жесткий срез
                 }
                 
                 real[k] *= targetGain;
@@ -234,7 +230,7 @@ public:
             }
         }
         
-        // --- СГЛАЖИВАНИЕ ПО ЧАСТОТАМ (Убирает бульканье) ---
+        // Сглаживание по частотам (убирает бульканье)
         for (int k = 1; k < FFT_SIZE / 2; ++k) {
             real[k] = real[k] * 0.6f + (real[k-1] + real[k+1]) * 0.2f;
             imag[k] = imag[k] * 0.6f + (imag[k-1] + imag[k+1]) * 0.2f;
@@ -270,7 +266,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Hard Gate Cut."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Hard Gate Cut (Calibrated)."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
