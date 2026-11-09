@@ -8,6 +8,9 @@
 #include <vector>
 #include <fstream>
 
+// Подключаем заголовочный файл библиотеки
+#include <specbleach_denoiser.h>
+
 #define LOG_TAG "AcousticDSP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
@@ -27,19 +30,19 @@ private:
     std::atomic<float> micVolume_{0.5f};   
     std::atomic<bool> filterEnabled_{true};
     
+    // Ссылка на наш денойзер
+    SpectralBleachHandle denoiser;
+    
     std::atomic<bool> isLearning_{false};
     std::atomic<bool> isReducing_{false};
     std::atomic<float> scale_{1.0f};      
     std::atomic<float> threshold_{0.05f}; 
-    std::vector<float> noiseProfile;
     int learnFramesCounter = 0;
 
     std::vector<float> inputBuffer;
     std::vector<float> outputBuffer;
     int bufferIndex = 0;
     float window[FFT_SIZE];
-    
-    std::vector<float> smoothGain;
 
     std::atomic<bool> isRecording_{false};
     std::vector<float> recordedBuffer;
@@ -58,8 +61,6 @@ private:
 public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
-        noiseProfile.resize(FFT_SIZE / 2 + 1, 0.0f);
-        smoothGain.resize(FFT_SIZE / 2 + 1, 1.0f);
         
         inputBuffer.resize(FFT_SIZE, 0.0f);
         outputBuffer.resize(FFT_SIZE, 0.0f);
@@ -68,6 +69,15 @@ public:
             window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
         }
         initFilters();
+
+        // ИНИЦИАЛИЗИРУЕМ БИБЛИОТЕКУ
+        denoiser = specbleach_initialize(48000, FFT_SIZE);
+    }
+
+    ~AudioEngine() {
+        if (denoiser) {
+            specbleach_free(denoiser);
+        }
     }
 
     void initFilters() { 
@@ -84,10 +94,14 @@ public:
     void setNoiseVol(float vol) { noiseVolume_.store(vol); }
     void setMicVol(float vol) { micVolume_.store(vol); }
     void setFilterEnabled(bool enabled) { filterEnabled_.store(enabled); }
-    void startLearning() { isLearning_.store(true); learnFramesCounter = 0; }
+    void startLearning() { 
+        isLearning_.store(true); 
+        learnFramesCounter = 0; 
+        specbleach_reset_profile(denoiser); // Сбрасываем старый шум
+    }
     void setReducing(bool enabled) { isReducing_.store(enabled); }
-    void setScale(float scale) { scale_.store(scale); }
-    void setThreshold(float th) { threshold_.store(th); }
+    void setScale(float scale) { scale_.store(scale); } // Оставляем для совместимости
+    void setThreshold(float th) { threshold_.store(th); } // Оставляем для совместимости
     
     void startRecording() { recordedBuffer.clear(); isRecording_.store(true); }
     
@@ -141,6 +155,7 @@ public:
 
             inputBuffer[FFT_SIZE - HOP_SIZE + bufferIndex] = mixed;
             
+            // Если включен шумодав, берем звук из библиотеки
             if (reducing || learning) {
                 floatData[i] = outputBuffer[bufferIndex];
             } else {
@@ -150,7 +165,7 @@ public:
             bufferIndex++;
 
             if (bufferIndex >= HOP_SIZE) {
-                processSTFT(reducing, learning);
+                processWithLibrary(reducing, learning);
                 if (learning) {
                     learnFramesCounter++;
                     if (learnFramesCounter > 50) isLearning_.store(false);
@@ -172,81 +187,24 @@ public:
         return oboe::DataCallbackResult::Continue;
     }
 
-    void fft(std::vector<float>& real, std::vector<float>& imag, bool invert) {
-        int n = real.size();
-        for (int i = 1, j = 0; i < n; i++) {
-            int bit = n >> 1;
-            for (; j & bit; bit >>= 1) j ^= bit;
-            j ^= bit;
-            if (i < j) { std::swap(real[i], real[j]); std::swap(imag[i], imag[j]); }
-        }
-        for (int len = 2; len <= n; len <<= 1) {
-            float ang = 2 * M_PI / len * (invert ? -1 : 1);
-            float wlen_r = cos(ang), wlen_i = sin(ang);
-            for (int i = 0; i < n; i += len) {
-                float w_r = 1, w_i = 0;
-                for (int j = 0; j < len / 2; j++) {
-                    float u_r = real[i+j], u_i = imag[i+j];
-                    float v_r = real[i+j+len/2] * w_r - imag[i+j+len/2] * w_i;
-                    float v_i = real[i+j+len/2] * w_i + imag[i+j+len/2] * w_r;
-                    real[i+j] = u_r + v_r; imag[i+j] = u_i + v_i;
-                    real[i+j+len/2] = u_r - v_r; imag[i+j+len/2] = u_i - v_i;
-                    float next_w_r = w_r * wlen_r - w_i * wlen_i;
-                    w_i = w_r * wlen_i + w_i * wlen_r; w_r = next_w_r;
-                }
-            }
-        }
-        if (invert) for (int i = 0; i < n; i++) { real[i] /= n; imag[i] /= n; }
-    }
-
-    void processSTFT(bool reducing, bool learning) {
-        std::vector<float> real(FFT_SIZE), imag(FFT_SIZE, 0.0f);
-        for (int i = 0; i < FFT_SIZE; ++i) real[i] = inputBuffer[i] * window[i];
+    void processWithLibrary(bool reducing, bool learning) {
+        std::vector<float> frame(FFT_SIZE);
         
-        fft(real, imag, false);
-
-        float currentScale = scale_.load();
-        float currentThreshold = threshold_.load();
-
-        for (int k = 0; k <= FFT_SIZE / 2; ++k) {
-            float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
-            
-            if (learning) {
-                noiseProfile[k] = std::max(noiseProfile[k], mag);
-            } 
-            
-            if (reducing && !learning) {
-                float targetGain = 1.0f;
-                float subtractValue = noiseProfile[k] * currentScale;
-                
-                if (mag > subtractValue) {
-                    targetGain = (mag - subtractValue) / mag;
-                } else {
-                    // СПЕКТРАЛЬНЫЙ ПОЛ: Никогда не глушим в ноль (оставляем 15%), чтобы не было гула!
-                    targetGain = 0.15f; 
-                }
-                
-                if (mag < currentThreshold) {
-                    targetGain = std::min(targetGain, 0.15f); 
-                }
-                
-                // СГЛАЖИВАНИЕ: Делаем переходы очень плавными (0.95 старого + 0.05 нового)
-                smoothGain[k] = 0.95f * smoothGain[k] + 0.05f * targetGain;
-                
-                real[k] *= smoothGain[k];
-                imag[k] *= smoothGain[k];
-            }
-        }
-        
-        for (int k = FFT_SIZE / 2 + 1; k < FFT_SIZE; ++k) {
-            real[k] = real[FFT_SIZE - k];
-            imag[k] = -imag[FFT_SIZE - k];
-        }
-
-        fft(real, imag, true);
-
+        // 1. Применяем окно (Hann)
         for (int i = 0; i < FFT_SIZE; ++i) {
-            outputBuffer[i] += real[i] * window[i] * 0.66f; 
+            frame[i] = inputBuffer[i] * window[i];
+        }
+
+        // 2. Отправляем в библиотеку
+        if (learning) {
+            specbleach_learn(denoiser, frame.data(), FFT_SIZE);
+        } else if (reducing) {
+            specbleach_process(denoiser, frame.data(), FFT_SIZE);
+        }
+
+        // 3. Overlap-Add
+        for (int i = 0; i < FFT_SIZE; ++i) {
+            outputBuffer[i] += frame[i] * window[i] * 0.66f;
         }
     }
 
@@ -268,7 +226,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: No-Hum Mode."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: SpecBleach Active."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
