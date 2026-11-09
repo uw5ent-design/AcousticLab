@@ -12,7 +12,7 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define FFT_SIZE 512
-#define HOP_SIZE 128
+#define HOP_SIZE 128   // 75% перекрытие
 #define FFT_BANDS 64
 
 class AudioEngine : public oboe::AudioStreamCallback {
@@ -31,13 +31,18 @@ private:
     std::atomic<bool> isReducing_{false};
     std::atomic<float> scale_{1.0f};      
     std::atomic<float> threshold_{0.05f}; 
+    
     std::vector<float> noiseProfile;
+    float maxNoiseMag = 0.0f; // Максимальная громкость шума (для калибровки порога)
     int learnFramesCounter = 0;
 
     std::vector<float> inputBuffer;
     std::vector<float> outputBuffer;
     int bufferIndex = 0;
     float window[FFT_SIZE];
+
+    // Для сглаживания и борьбы со щелчками
+    std::vector<float> smoothGain;
 
     std::atomic<bool> isRecording_{false};
     std::vector<float> recordedBuffer;
@@ -57,6 +62,7 @@ public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
         noiseProfile.resize(FFT_SIZE / 2 + 1, 0.0f);
+        smoothGain.resize(FFT_SIZE / 2 + 1, 1.0f);
         
         inputBuffer.resize(FFT_SIZE, 0.0f);
         outputBuffer.resize(FFT_SIZE, 0.0f);
@@ -81,7 +87,13 @@ public:
     void setNoiseVol(float vol) { noiseVolume_.store(vol); }
     void setMicVol(float vol) { micVolume_.store(vol); }
     void setFilterEnabled(bool enabled) { filterEnabled_.store(enabled); }
-    void startLearning() { isLearning_.store(true); learnFramesCounter = 0; }
+    
+    void startLearning() { 
+        isLearning_.store(true); 
+        learnFramesCounter = 0; 
+        maxNoiseMag = 0.0f; // Сбрасываем старый максимум
+    }
+    
     void setReducing(bool enabled) { isReducing_.store(enabled); }
     void setScale(float scale) { scale_.store(scale); }
     void setThreshold(float th) { threshold_.store(th); }
@@ -205,32 +217,39 @@ public:
         float currentScale = scale_.load();
         float currentThreshold = threshold_.load();
 
-        // РАСПРЕДЕЛЯЕМ ПОРОГ ПО ВСЕМУ ПОЛЗУНКУ (умножаем на 40 вместо 150)
-        float hardThreshold = currentThreshold * 40.0f; 
-
         for (int k = 0; k <= FFT_SIZE / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
             
             if (learning) {
                 noiseProfile[k] = std::max(noiseProfile[k], mag);
+                if (mag > maxNoiseMag) maxNoiseMag = mag; // Запоминаем самый громкий пик шума
             } 
             
             if (reducing && !learning) {
-                float subtractValue = noiseProfile[k] * currentScale;
+                // 1. Вычитаем шум с учетом Scale (до 3х раз сильнее)
+                float subtractValue = noiseProfile[k] * (currentScale * 2.0f);
+                
+                // 2. Порог теперь привязан к максимальному шуму в комнате (0-100% шкалы)
+                float hardThreshold = maxNoiseMag * currentThreshold;
+                
                 float targetGain = 0.0f;
                 
+                // Если звук громче вычитаемого шума И громче нашего порога
                 if (mag > subtractValue && mag > hardThreshold) {
                     targetGain = (mag - subtractValue) / mag;
                 } else {
-                    targetGain = 0.0f; // Жесткий срез
+                    targetGain = 0.0f; // Вырубаем
                 }
                 
-                real[k] *= targetGain;
-                imag[k] *= targetGain;
+                // 3. СГЛАЖИВАНИЕ (убирает щелчки при резком выключении)
+                smoothGain[k] = 0.7f * smoothGain[k] + 0.3f * targetGain;
+                
+                real[k] *= smoothGain[k];
+                imag[k] *= smoothGain[k];
             }
         }
         
-        // Сглаживание по частотам (убирает бульканье)
+        // Сглаживание по соседним частотам (убирает бульканье)
         for (int k = 1; k < FFT_SIZE / 2; ++k) {
             real[k] = real[k] * 0.6f + (real[k-1] + real[k+1]) * 0.2f;
             imag[k] = imag[k] * 0.6f + (imag[k-1] + imag[k+1]) * 0.2f;
@@ -266,7 +285,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Hard Gate Cut (Calibrated)."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Calibrated & Smooth."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
