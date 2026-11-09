@@ -12,7 +12,7 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 
 #define FFT_SIZE 512
-#define HOP_SIZE 128   // 75% перекрытие
+#define HOP_SIZE 128
 #define FFT_BANDS 64
 
 class AudioEngine : public oboe::AudioStreamCallback {
@@ -34,7 +34,9 @@ private:
     
     std::vector<float> noiseProfile;
     int learnFramesCounter = 0;
-    bool hasLearned = false; // Флаг: был ли захват шума
+    
+    // ИСПРАВЛЕНИЕ 1: Делаем флаг атомарным, чтобы аудио-поток его видел
+    std::atomic<bool> hasLearned_{false}; 
 
     std::vector<float> inputBuffer;
     std::vector<float> outputBuffer;
@@ -89,8 +91,7 @@ public:
     void startLearning() { 
         isLearning_.store(true); 
         learnFramesCounter = 0; 
-        hasLearned = true; // Разрешаем шумодаву работать
-        // Очищаем старый профиль
+        hasLearned_.store(true);
         for(size_t i=0; i<noiseProfile.size(); i++) noiseProfile[i] = 0.0f;
     }
     
@@ -150,8 +151,8 @@ public:
 
             inputBuffer[FFT_SIZE - HOP_SIZE + bufferIndex] = mixed;
             
-            // Если шумодав включен И мы уже захватили фон
-            if ((reducing || learning) && hasLearned) {
+            // ИСПРАВЛЕНИЕ 2: Используем атомарный флаг
+            if ((reducing || learning) && hasLearned_.load()) {
                 floatData[i] = outputBuffer[bufferIndex];
             } else {
                 floatData[i] = mixed;
@@ -163,7 +164,8 @@ public:
                 processSTFT(reducing, learning);
                 if (learning) {
                     learnFramesCounter++;
-                    if (learnFramesCounter > 50) isLearning_.store(false);
+                    // ИСПРАВЛЕНИЕ 3: Увеличиваем время захвата до реальных 2 секунд (~750 кадров)
+                    if (learnFramesCounter > 750) isLearning_.store(false);
                 }
                 bufferIndex = 0;
                 for(int j=0; j<FFT_SIZE-HOP_SIZE; j++) {
@@ -218,8 +220,8 @@ public:
         float currentScale = scale_.load();
         float currentThreshold = threshold_.load();
 
-        // ПРОСТОЙ И ПОНЯТНЫЙ ПОРОГ: 100% = амплитуда 100
-        float hardThreshold = currentThreshold * 100.0f; 
+        // ИСПРАВЛЕНИЕ 4: Правильный масштаб порога для нашего FFT
+        float hardThreshold = currentThreshold * 300.0f; 
 
         for (int k = 0; k <= FFT_SIZE / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
@@ -229,22 +231,20 @@ public:
             } 
             
             if (reducing && !learning) {
-                // Вычитаем шум с учетом Scale
                 float subtractValue = noiseProfile[k] * currentScale;
                 float targetGain = 1.0f;
                 
-                if (mag < subtractValue) {
-                    targetGain = 0.0f; // Сигнал слабее шума - рубим
-                } else {
+                if (mag > subtractValue) {
                     targetGain = (mag - subtractValue) / mag;
-                }
-
-                // Жесткий порог (Noise Gate)
-                if (mag < hardThreshold) {
-                    targetGain = 0.0f; // Сигнал слабее порога - рубим
+                } else {
+                    targetGain = 0.0f; 
                 }
                 
-                // БЫСТРОЕ СГЛАЖИВАНИЕ (убирает щелчки, но срабатывает мгновенно)
+                if (mag < hardThreshold) {
+                    targetGain = 0.0f; 
+                }
+                
+                // Плавное затухание, убирает щелчки
                 smoothGain[k] = 0.5f * smoothGain[k] + 0.5f * targetGain;
                 
                 real[k] *= smoothGain[k];
@@ -252,7 +252,6 @@ public:
             }
         }
         
-        // Сглаживание по соседним частотам
         for (int k = 1; k < FFT_SIZE / 2; ++k) {
             real[k] = real[k] * 0.6f + (real[k-1] + real[k+1]) * 0.2f;
             imag[k] = imag[k] * 0.6f + (imag[k-1] + imag[k+1]) * 0.2f;
@@ -265,8 +264,9 @@ public:
 
         fft(real, imag, true);
 
+        // ИСПРАВЛЕНИЕ 5: Коэффициент 0.666f вместо 1.5f убирает щелчки и перегрузку
         for (int i = 0; i < FFT_SIZE; ++i) {
-            outputBuffer[i] += real[i] * window[i] * 1.5f; 
+            outputBuffer[i] += real[i] * window[i] * 0.666f; 
         }
     }
 
@@ -288,7 +288,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Calibrated & Smooth."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Fully Fixed & Calibrated."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
