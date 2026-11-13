@@ -35,8 +35,8 @@ private:
 
     // Динамические размеры
     int fftSize = 512;
-    int hopSize = 128; // 4x overlap по умолчанию
-    std::atomic<bool> needsResize_{false};
+    int hopSize = 128; 
+    int currentOverlap = 4; // Храним текущее перекрытие
 
     std::vector<float> inputBuffer;
     std::vector<float> outputBuffer;
@@ -62,24 +62,25 @@ private:
         fftSize = newFftSize;
         hopSize = newHopSize;
         
-        noiseProfile.assign(fftSize / 2 + 1, 0.0f);
-        smoothGain.assign(fftSize / 2 + 1, 1.0f);
-        inputBuffer.assign(fftSize, 0.0f);
-        outputBuffer.assign(fftSize, 0.0f);
+        // Сохраняем старые данные при изменении размера
+        noiseProfile.resize(fftSize / 2 + 1, 0.0f);
+        smoothGain.resize(fftSize / 2 + 1, 1.0f);
+        inputBuffer.resize(fftSize, 0.0f);
+        outputBuffer.resize(fftSize, 0.0f);
         window.resize(fftSize);
         
         for (int i = 0; i < fftSize; ++i) {
             window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (fftSize - 1)));
         }
-        bufferIndex = 0;
-        hasLearned_.store(false);
-        LOGI("Resized FFT to %d, Hop to %d", fftSize, hopSize);
+        
+        if (bufferIndex >= hopSize) bufferIndex = 0;
+        LOGI("Resized FFT to %d, Hop to %d (Overlap %dx)", fftSize, hopSize, currentOverlap);
     }
 
 public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
-        resizeBuffers(512, 128); // Инициализация по умолчанию
+        resizeBuffers(512, 128); 
         initFilters();
     }
 
@@ -95,11 +96,12 @@ public:
     }
 
     void setFftSize(int size) {
-        int newHop = size / 4; // Сохраняем 4x overlap
+        int newHop = size / currentOverlap; 
         resizeBuffers(size, newHop);
     }
 
     void setOverlap(int overlap) {
+        currentOverlap = overlap;
         int newHop = fftSize / overlap;
         resizeBuffers(fftSize, newHop);
     }
@@ -169,9 +171,7 @@ public:
                 mixed = bandpass.process(mixed);
             }
 
-            // Проверка на переполнение буфера (если пользователь резко меняет размер)
-            if (bufferIndex < 0 || bufferIndex >= fftSize) bufferIndex = 0;
-
+            if (bufferIndex >= fftSize) bufferIndex = 0;
             inputBuffer[fftSize - hopSize + bufferIndex] = mixed;
             
             if ((reducing || learning) && hasLearned_.load()) {
@@ -257,14 +257,15 @@ public:
                 if (mag > subtractValue) {
                     targetGain = (mag - subtractValue) / mag;
                 } else {
-                    targetGain = 0.0f; 
+                    targetGain = 0.05f; // Оставляем 5% для борьбы с гудением
                 }
                 
                 if (mag < hardThreshold) {
-                    targetGain = 0.0f; 
+                    targetGain = 0.05f; 
                 }
                 
-                smoothGain[k] = 0.5f * smoothGain[k] + 0.5f * targetGain;
+                // Усиленное сглаживание для подавления "трансформаторного гула"
+                smoothGain[k] = 0.85f * smoothGain[k] + 0.15f * targetGain;
                 
                 real[k] *= smoothGain[k];
                 imag[k] *= smoothGain[k];
@@ -283,8 +284,11 @@ public:
 
         fft(real, imag, true);
 
+        // Динамическая нормализация в зависимости от перекрытия
+        float normFactor = (currentOverlap == 2) ? 0.666f : 0.5f;
+
         for (int i = 0; i < fftSize; ++i) {
-            outputBuffer[i] += real[i] * window[i] * 0.666f; 
+            outputBuffer[i] += real[i] * window[i] * normFactor; 
         }
     }
 
@@ -323,6 +327,5 @@ extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopR
     engine.stopRecording(nativeString);
     env->ReleaseStringUTFChars(path, nativeString);
 }
-// НОВЫЕ JNI
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_setFftSize(JNIEnv* env, jobject, jint size) { engine.setFftSize(size); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_setOverlap(JNIEnv* env, jobject, jint overlap) { engine.setOverlap(overlap); }
