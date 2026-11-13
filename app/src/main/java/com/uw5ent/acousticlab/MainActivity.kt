@@ -32,7 +32,6 @@ class MainActivity : AppCompatActivity() {
     external fun setThreshold(th: Float)
     external fun startRecording()
     external fun stopRecording(path: String)
-    // НОВЫЕ МЕТОДЫ
     external fun setFftSize(size: Int)
     external fun setOverlap(overlap: Int)
 
@@ -83,7 +82,7 @@ class MainActivity : AppCompatActivity() {
 
         // --- NOISE REDUCTION (GoldWave Style) ---
         val btnLearn = Button(this).apply {
-            text = "Threshold: Capture Current Spectrum"
+            text = "THRESHOLD: CAPTURE CURRENT SPECTRUM"
             setOnClickListener { startLearning(); Toast.makeText(context, "Слушаю 2 сек...", Toast.LENGTH_SHORT).show() }
         }
 
