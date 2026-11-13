@@ -10,9 +10,6 @@
 
 #define LOG_TAG "AcousticDSP"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
-
-#define FFT_SIZE 512
-#define HOP_SIZE 128
 #define FFT_BANDS 64
 
 class AudioEngine : public oboe::AudioStreamCallback {
@@ -36,10 +33,15 @@ private:
     int learnFramesCounter = 0;
     std::atomic<bool> hasLearned_{false}; 
 
+    // Динамические размеры
+    int fftSize = 512;
+    int hopSize = 128; // 4x overlap по умолчанию
+    std::atomic<bool> needsResize_{false};
+
     std::vector<float> inputBuffer;
     std::vector<float> outputBuffer;
     int bufferIndex = 0;
-    float window[FFT_SIZE];
+    std::vector<float> window;
     std::vector<float> smoothGain;
 
     std::atomic<bool> isRecording_{false};
@@ -56,18 +58,28 @@ private:
     };
     Biquad bandpass, notch50;
 
+    void resizeBuffers(int newFftSize, int newHopSize) {
+        fftSize = newFftSize;
+        hopSize = newHopSize;
+        
+        noiseProfile.assign(fftSize / 2 + 1, 0.0f);
+        smoothGain.assign(fftSize / 2 + 1, 1.0f);
+        inputBuffer.assign(fftSize, 0.0f);
+        outputBuffer.assign(fftSize, 0.0f);
+        window.resize(fftSize);
+        
+        for (int i = 0; i < fftSize; ++i) {
+            window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (fftSize - 1)));
+        }
+        bufferIndex = 0;
+        hasLearned_.store(false);
+        LOGI("Resized FFT to %d, Hop to %d", fftSize, hopSize);
+    }
+
 public:
     AudioEngine() : gen(std::random_device{}()), dis(-1.0f, 1.0f) {
         for(int i=0; i<FFT_BANDS; i++) fftOutput[i] = 0.0f;
-        noiseProfile.resize(FFT_SIZE / 2 + 1, 0.0f);
-        smoothGain.resize(FFT_SIZE / 2 + 1, 1.0f);
-        
-        inputBuffer.resize(FFT_SIZE, 0.0f);
-        outputBuffer.resize(FFT_SIZE, 0.0f);
-        
-        for (int i = 0; i < FFT_SIZE; ++i) {
-            window[i] = 0.5f * (1.0f - cosf(2.0f * M_PI * i / (FFT_SIZE - 1)));
-        }
+        resizeBuffers(512, 128); // Инициализация по умолчанию
         initFilters();
     }
 
@@ -80,6 +92,16 @@ public:
         float w0_50 = 2.0f * M_PI * 50.0f / fs; float alpha_50 = sin(w0_50) / 10.0f; float a0_50 = 1.0f + alpha_50;
         notch50.b0 = 1.0f / a0_50; notch50.b1 = -2.0f * cos(w0_50) / a0_50; notch50.b2 = 1.0f / a0_50;
         notch50.a1 = -2.0f * cos(w0_50) / a0_50; notch50.a2 = (1.0f - alpha_50) / a0_50;
+    }
+
+    void setFftSize(int size) {
+        int newHop = size / 4; // Сохраняем 4x overlap
+        resizeBuffers(size, newHop);
+    }
+
+    void setOverlap(int overlap) {
+        int newHop = fftSize / overlap;
+        resizeBuffers(fftSize, newHop);
     }
 
     void setNoiseVol(float vol) { noiseVolume_.store(vol); }
@@ -147,7 +169,10 @@ public:
                 mixed = bandpass.process(mixed);
             }
 
-            inputBuffer[FFT_SIZE - HOP_SIZE + bufferIndex] = mixed;
+            // Проверка на переполнение буфера (если пользователь резко меняет размер)
+            if (bufferIndex < 0 || bufferIndex >= fftSize) bufferIndex = 0;
+
+            inputBuffer[fftSize - hopSize + bufferIndex] = mixed;
             
             if ((reducing || learning) && hasLearned_.load()) {
                 floatData[i] = outputBuffer[bufferIndex];
@@ -157,18 +182,18 @@ public:
             
             bufferIndex++;
 
-            if (bufferIndex >= HOP_SIZE) {
+            if (bufferIndex >= hopSize) {
                 processSTFT(reducing, learning);
                 if (learning) {
                     learnFramesCounter++;
                     if (learnFramesCounter > 750) isLearning_.store(false);
                 }
                 bufferIndex = 0;
-                for(int j=0; j<FFT_SIZE-HOP_SIZE; j++) {
-                    inputBuffer[j] = inputBuffer[j+HOP_SIZE];
-                    outputBuffer[j] = outputBuffer[j+HOP_SIZE];
+                for(int j=0; j<fftSize-hopSize; j++) {
+                    inputBuffer[j] = inputBuffer[j+hopSize];
+                    outputBuffer[j] = outputBuffer[j+hopSize];
                 }
-                for(int j=FFT_SIZE-HOP_SIZE; j<FFT_SIZE; j++) outputBuffer[j] = 0.0f;
+                for(int j=fftSize-hopSize; j<fftSize; j++) outputBuffer[j] = 0.0f;
             }
         }
 
@@ -208,18 +233,17 @@ public:
     }
 
     void processSTFT(bool reducing, bool learning) {
-        std::vector<float> real(FFT_SIZE), imag(FFT_SIZE, 0.0f);
-        for (int i = 0; i < FFT_SIZE; ++i) real[i] = inputBuffer[i] * window[i];
+        std::vector<float> real(fftSize), imag(fftSize, 0.0f);
+        for (int i = 0; i < fftSize; ++i) real[i] = inputBuffer[i] * window[i];
         
         fft(real, imag, false);
 
         float currentScale = scale_.load();
         float currentThreshold = threshold_.load();
 
-        // ИСПРАВЛЕНИЕ: Уменьшили коэффициент со 300 до 40, чтобы порог работал по всей шкале
         float hardThreshold = currentThreshold * 40.0f; 
 
-        for (int k = 0; k <= FFT_SIZE / 2; ++k) {
+        for (int k = 0; k <= fftSize / 2; ++k) {
             float mag = sqrtf(real[k]*real[k] + imag[k]*imag[k]);
             
             if (learning) {
@@ -247,19 +271,19 @@ public:
             }
         }
         
-        for (int k = 1; k < FFT_SIZE / 2; ++k) {
+        for (int k = 1; k < fftSize / 2; ++k) {
             real[k] = real[k] * 0.6f + (real[k-1] + real[k+1]) * 0.2f;
             imag[k] = imag[k] * 0.6f + (imag[k-1] + imag[k+1]) * 0.2f;
         }
 
-        for (int k = FFT_SIZE / 2 + 1; k < FFT_SIZE; ++k) {
-            real[k] = real[FFT_SIZE - k];
-            imag[k] = -imag[FFT_SIZE - k];
+        for (int k = fftSize / 2 + 1; k < fftSize; ++k) {
+            real[k] = real[fftSize - k];
+            imag[k] = -imag[fftSize - k];
         }
 
         fft(real, imag, true);
 
-        for (int i = 0; i < FFT_SIZE; ++i) {
+        for (int i = 0; i < fftSize; ++i) {
             outputBuffer[i] += real[i] * window[i] * 0.666f; 
         }
     }
@@ -282,7 +306,7 @@ public:
 
 AudioEngine engine;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: Smooth Gate."); }
+extern "C" JNIEXPORT jstring JNICALL Java_com_uw5ent_acousticlab_MainActivity_getDspStatus(JNIEnv* env, jobject) { return env->NewStringUTF("DSP Engine: GoldWave Emulation."); }
 extern "C" JNIEXPORT jboolean JNICALL Java_com_uw5ent_acousticlab_MainActivity_startAudio(JNIEnv* env, jobject) { return engine.start(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopAudio(JNIEnv* env, jobject) { engine.stop(); }
 extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_getFftData(JNIEnv* env, jobject, jfloatArray outArray) { jfloat* buffer = env->GetFloatArrayElements(outArray, 0); engine.getFftData(buffer); env->ReleaseFloatArrayElements(outArray, buffer, 0); }
@@ -299,3 +323,6 @@ extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_stopR
     engine.stopRecording(nativeString);
     env->ReleaseStringUTFChars(path, nativeString);
 }
+// НОВЫЕ JNI
+extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_setFftSize(JNIEnv* env, jobject, jint size) { engine.setFftSize(size); }
+extern "C" JNIEXPORT void JNICALL Java_com_uw5ent_acousticlab_MainActivity_setOverlap(JNIEnv* env, jobject, jint overlap) { engine.setOverlap(overlap); }
