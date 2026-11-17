@@ -1,0 +1,84 @@
+name: Build & Test libspecbleach
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - "*"
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: ${{ matrix.config.name }}
+    runs-on: ubuntu-24.04
+    env:
+      SONAR_CI_ENABLED: ${{ vars.SONAR_CI_ENABLED }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - name: "Standard + Coverage"
+            cmake_flags: "-DENABLE_TESTS=ON -DENABLE_EXAMPLES=ON -DSPECBLEACH_BUILD_EXTRAS=ON -DENABLE_COVERAGE=ON -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=Debug"
+            run_coverage: true
+          - name: "Sanitizers (ASan + UBSan)"
+            cmake_flags: "-DENABLE_TESTS=ON -DENABLE_EXAMPLES=ON -DENABLE_SANITIZERS=ON -DCMAKE_BUILD_TYPE=Release"
+            run_coverage: false
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4.3.1
+        with:
+          submodules: recursive
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -qq \
+            cmake \
+            gcovr \
+            libsndfile1-dev
+
+      - name: Configure build
+        run: |
+          cmake -B build \
+            ${{ matrix.config.cmake_flags }}
+
+      - name: Build project
+        run: |
+          cmake --build build -j4
+
+      - name: Run CTest Suite
+        run: |
+          cd build
+          # Full suite (including integration) on every PR and main push.
+          ctest --output-on-failure --test-dir . --parallel 4
+
+      - name: Generate coverage report
+        if: matrix.config.run_coverage && env.SONAR_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        run: |
+          gcovr --xml build/coverage.xml -r . -e tests/ -e examples/ -e thirdparty/ \
+            --gcov-ignore-parse-errors negative_hits.warn_once_per_file
+          # shortcut: Sonar's Cobertura parser reads "hits" as int32 and hard-fails on
+          # gcovr's >2^31 execution counts (hot DSP loops). Cap them until handled upstream.
+          sed -i -E 's/hits="[0-9]{10,}"/hits="2147483647"/g' build/coverage.xml
+
+      - name: Cache SonarQube packages
+        if: matrix.config.run_coverage && env.SONAR_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: actions/cache@v4.3.0
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+
+      - name: SonarCloud analysis
+        if: matrix.config.run_coverage && env.SONAR_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: SonarSource/sonarqube-scan-action@v8.3.0
+        with:
+          args: >
+            -Dsonar.qualitygate.wait=true
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
