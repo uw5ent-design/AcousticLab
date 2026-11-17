@@ -28,6 +28,13 @@ class MainActivity : AppCompatActivity() {
     external fun setFilterEnabled(enabled: Boolean)
     external fun startLearning()
     external fun setNoiseReduction(enabled: Boolean)
+    
+    // ВОТ ОНИ, НАШИ ПОЛЗУНКИ:
+    external fun setScale(scale: Float)
+    external fun setThreshold(th: Float)
+    external fun setFftSize(size: Int)
+    external fun setOverlap(overlap: Int)
+    
     external fun startRecording()
     external fun stopRecording(path: String)
 
@@ -64,18 +71,23 @@ class MainActivity : AppCompatActivity() {
             text = getDspStatus() 
         }
 
-        // --- ГРОМКОСТЬ ШУМА ---
-        val noiseVolText = TextView(this).apply { text = "Громкость Шума:" }
+        // --- ГРОМКОСТЬ ---
+        val noiseVolText = TextView(this).apply { text = "Громкость Шума: 50%" }
         val noiseVolSlider = SeekBar(this).apply {
-            max = 100; progress = 0 
-            setOnSeekBarChangeListener(createListener { setNoiseVolume(it / 100.0f) })
+            max = 100; progress = 50 
+            setOnSeekBarChangeListener(createListener { 
+                setNoiseVolume(it / 100.0f)
+                noiseVolText.text = "Громкость Шума: $it%" 
+            })
         }
 
-        // --- ГРОМКОСТЬ МИКРОФОНА ---
-        val micVolText = TextView(this).apply { text = "Громкость Микрофона:" }
+        val micVolText = TextView(this).apply { text = "Громкость Микрофона: 100%" }
         val micVolSlider = SeekBar(this).apply {
             max = 100; progress = 100 
-            setOnSeekBarChangeListener(createListener { setMicVolume(it / 100.0f) })
+            setOnSeekBarChangeListener(createListener { 
+                setMicVolume(it / 100.0f)
+                micVolText.text = "Громкость Микрофона: $it%" 
+            })
         }
 
         val filterCheckBox = CheckBox(this).apply {
@@ -97,6 +109,54 @@ class MainActivity : AppCompatActivity() {
             text = "Включить Noise Reduction (GoldWave)"
             isChecked = false
             setOnCheckedChangeListener { _, isChecked -> setNoiseReduction(isChecked) }
+        }
+
+        // --- ПОЛЗУНКИ ИЗ GOLDWAVE ---
+        val scaleText = TextView(this).apply { text = "Scale (Агрессивность): 100%" }
+        val scaleSlider = SeekBar(this).apply {
+            max = 300; progress = 100
+            setOnSeekBarChangeListener(createListener { 
+                setScale(it / 100.0f)
+                scaleText.text = "Scale: $it%" 
+            })
+        }
+
+        val thText = TextView(this).apply { text = "Threshold (Порог): 10%" }
+        val thSlider = SeekBar(this).apply {
+            max = 100; progress = 10
+            setOnSeekBarChangeListener(createListener { 
+                setThreshold(it / 100.0f)
+                thText.text = "Threshold: $it%" 
+            })
+        }
+
+        val fftText = TextView(this).apply { text = "FFT size: 9 (512)" }
+        val fftSlider = SeekBar(this).apply {
+            max = 3; progress = 0 
+            setOnSeekBarChangeListener(createListener { p ->
+                val size = 512 shl p 
+                setFftSize(size)
+                fftText.text = "FFT size: ${9 + p} ($size)"
+            })
+        }
+
+        // --- ОБНОВЛЕННЫЙ OVERLAP (4x, 8x, 16x) ---
+        val overlapSpinner = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, arrayOf("Overlap: 4x", "Overlap: 8x", "Overlap: 16x")).apply {
+                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
+            }
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
+                    val overlapValue = when(position) {
+                        0 -> 4
+                        1 -> 8
+                        2 -> 16
+                        else -> 4
+                    }
+                    setOverlap(overlapValue)
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
         }
 
         // --- ЗАПИСЬ ---
@@ -132,6 +192,10 @@ class MainActivity : AppCompatActivity() {
         layout.addView(filterCheckBox)
         layout.addView(btnLearn)
         layout.addView(noiseReductionCheckBox)
+        layout.addView(scaleText); layout.addView(scaleSlider)
+        layout.addView(thText); layout.addView(thSlider)
+        layout.addView(fftText); layout.addView(fftSlider)
+        layout.addView(overlapSpinner)
         layout.addView(btnRecordToggle)
         layout.addView(spectrogramView)
         layout.addView(btnStart)
