@@ -28,12 +28,8 @@ class MainActivity : AppCompatActivity() {
     external fun setFilterEnabled(enabled: Boolean)
     external fun startLearning()
     external fun setNoiseReduction(enabled: Boolean)
-    external fun setScale(scale: Float)
-    external fun setThreshold(th: Float)
     external fun startRecording()
     external fun stopRecording(path: String)
-    external fun setFftSize(size: Int)
-    external fun setOverlap(overlap: Int)
 
     private val fftBuffer = FloatArray(64)
     private val handler = Handler(Looper.getMainLooper())
@@ -60,83 +56,47 @@ class MainActivity : AppCompatActivity() {
         val scrollView = ScrollView(this)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(30, 30, 30, 30)
+            setPadding(40, 40, 40, 40)
         }
 
-        val textView = TextView(this).apply { textSize = 16f; text = getDspStatus() }
+        val textView = TextView(this).apply { 
+            textSize = 16f
+            text = getDspStatus() 
+        }
 
-        // --- ГРОМКОСТЬ ---
+        // --- ГРОМКОСТЬ ШУМА ---
+        val noiseVolText = TextView(this).apply { text = "Громкость Шума:" }
         val noiseVolSlider = SeekBar(this).apply {
-            max = 100; progress = 50 
+            max = 100; progress = 0 
             setOnSeekBarChangeListener(createListener { setNoiseVolume(it / 100.0f) })
         }
+
+        // --- ГРОМКОСТЬ МИКРОФОНА ---
+        val micVolText = TextView(this).apply { text = "Громкость Микрофона:" }
         val micVolSlider = SeekBar(this).apply {
             max = 100; progress = 100 
             setOnSeekBarChangeListener(createListener { setMicVolume(it / 100.0f) })
         }
 
         val filterCheckBox = CheckBox(this).apply {
-            text = "DSP-фильтры (Bandpass)"; isChecked = true 
+            text = "DSP-фильтры (Bandpass)"
+            isChecked = false 
             setOnCheckedChangeListener { _, isChecked -> setFilterEnabled(isChecked) }
         }
 
-        // --- NOISE REDUCTION (GoldWave Style) ---
+        // --- NOISE REDUCTION ---
         val btnLearn = Button(this).apply {
-            text = "THRESHOLD: CAPTURE CURRENT SPECTRUM"
-            setOnClickListener { startLearning(); Toast.makeText(context, "Слушаю 2 сек...", Toast.LENGTH_SHORT).show() }
+            text = "ЗАХВАТИТЬ ШУМ ФОНА"
+            setOnClickListener { 
+                startLearning()
+                Toast.makeText(context, "Слушаю фон 2 сек...", Toast.LENGTH_SHORT).show() 
+            }
         }
 
         val noiseReductionCheckBox = CheckBox(this).apply {
-            text = "2. Включить Noise Reduction"; isChecked = false
+            text = "Включить Noise Reduction (GoldWave)"
+            isChecked = false
             setOnCheckedChangeListener { _, isChecked -> setNoiseReduction(isChecked) }
-        }
-
-        val scaleText = TextView(this).apply { text = "Scale (Агрессивность): 100%" }
-        val scaleSlider = SeekBar(this).apply {
-            max = 300; progress = 100
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
-                    setScale(p / 100.0f); scaleText.text = "Scale: $p%" 
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}; override fun onStopTrackingTouch(sb: SeekBar?) {}
-            })
-        }
-
-        val thText = TextView(this).apply { text = "Threshold (Порог): 10%" }
-        val thSlider = SeekBar(this).apply {
-            max = 100; progress = 10
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
-                    setThreshold(p / 100.0f); thText.text = "Threshold: $p%" 
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}; override fun onStopTrackingTouch(sb: SeekBar?) {}
-            })
-        }
-
-        // --- FFT SIZE И OVERLAP (Как в GoldWave) ---
-        val fftText = TextView(this).apply { text = "FFT size: 9 (512)" }
-        val fftSlider = SeekBar(this).apply {
-            max = 3; progress = 0 // 0=512, 1=1024, 2=2048, 3=4096
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(sb: SeekBar?, p: Int, f: Boolean) { 
-                    val size = 512 shl p // 512 * 2^p
-                    setFftSize(size)
-                    fftText.text = "FFT size: ${9 + p} ($size)"
-                }
-                override fun onStartTrackingTouch(sb: SeekBar?) {}; override fun onStopTrackingTouch(sb: SeekBar?) {}
-            })
-        }
-
-        val overlapSpinner = Spinner(this).apply {
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_item, arrayOf("Overlap: 2x", "Overlap: 4x")).apply {
-                setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item)
-            }
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: android.view.View?, position: Int, id: Long) {
-                    setOverlap(if (position == 0) 2 else 4)
-                }
-                override fun onNothingSelected(parent: AdapterView<*>?) {}
-            }
         }
 
         // --- ЗАПИСЬ ---
@@ -153,22 +113,25 @@ class MainActivity : AppCompatActivity() {
         }
 
         spectrogramView = SpectrogramView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 300)
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 400)
         }
 
-        val btnStart = Button(this).apply { text = "Включить систему"; setOnClickListener { text = if (startAudio()) "Работает!" else "Ошибка" } }
-        val btnStop = Button(this).apply { text = "Остановить"; setOnClickListener { stopAudio(); text = "Стоп" } }
+        val btnStart = Button(this).apply { 
+            text = "ВКЛЮЧИТЬ СИСТЕМУ"
+            setOnClickListener { text = if (startAudio()) "РАБОТАЕТ!" else "Ошибка" } 
+        }
+        
+        val btnStop = Button(this).apply { 
+            text = "ОСТАНОВИТЬ"
+            setOnClickListener { stopAudio(); text = "Остановлено" } 
+        }
 
         layout.addView(textView)
-        layout.addView(TextView(this).apply { text = "Громкость Шума:" }); layout.addView(noiseVolSlider)
-        layout.addView(TextView(this).apply { text = "Громкость Микрофона:" }); layout.addView(micVolSlider)
+        layout.addView(noiseVolText); layout.addView(noiseVolSlider)
+        layout.addView(micVolText); layout.addView(micVolSlider)
         layout.addView(filterCheckBox)
         layout.addView(btnLearn)
         layout.addView(noiseReductionCheckBox)
-        layout.addView(scaleText); layout.addView(scaleSlider)
-        layout.addView(thText); layout.addView(thSlider)
-        layout.addView(fftText); layout.addView(fftSlider)
-        layout.addView(overlapSpinner)
         layout.addView(btnRecordToggle)
         layout.addView(spectrogramView)
         layout.addView(btnStart)
